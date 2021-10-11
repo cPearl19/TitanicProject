@@ -1,0 +1,376 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r}
+library("Hmisc")
+library("tidyr")
+library("mice")
+library("dplyr")
+library("ggplot2")
+library("BaylorEdPsych")
+library("caret")
+library("caretEnsemble")
+```
+
+
+
+Read in Sets
+```{r}
+train<-read.csv('/Users/Cam/Documents/Final Project/train.csv', header=TRUE, sep=",", na.strings = c("NA",""))
+test<-read.csv('/Users/Cam/Documents/Final Project/test.csv', header=TRUE, sep=",", na.strings = c("NA",""))
+str(train)
+train_labels<-train[,1:2]
+```
+
+
+```{r}
+
+train$Survived<-NULL
+train<-rbind(train,test)
+train<-merge(train,train_labels,all=T)
+```
+
+Printing the amount of NA in each column
+```{r}
+na_countTrain<-apply(train, 2, function(x) sum(is.na(x)))
+na_countTest<-apply(test, 2, function(x) sum(is.na(x)))
+print(na_countTrain)
+print(na_countTest)
+
+
+```
+
+```{r}
+keepTrain<-c( "Name", "Sex", "Age", "Pclass", "SibSp", "Parch", "Fare", "Embarked", "Survived")
+keepTest<-c("Name", "Sex", "Age", "Pclass", "SibSp", "Parch", "Fare", "Embarked")
+train<-train[keepTrain]
+test<-test[keepTest]
+```
+
+refactoring data
+```{r}
+train$Pclass<-as.ordered(train$Pclass)
+train$Name<-as.character(train$Name)
+train$Survived<-as.factor(train$Survived)
+```
+
+
+Analyzing title as that could indicate sicio economic status
+```{r}
+train2<-separate(train, Name, into=c("Last Name", "Title", "First Name"), sep="[\\.|\\,]", remove=FALSE)
+train2$Title<-gsub("\\s+","",train2$Title)
+
+
+```
+
+```{r}
+table(train2$Sex, train2$Title)
+```
+```{r}
+train2$NameLength<-nchar(train2$Name)
+```
+
+Get number of people on ticket
+```{r}
+sameTicket<-as.data.frame(table(train2$Ticket))
+colnames(sameTicket)<-c("Ticket","Ticket.Freq")
+train2<-merge(train2, sameTicket, by="Ticket",all=TRUE)
+```
+
+More preproccessing title
+```{r}
+train2$Title[train2$Title %in% c("Mlle", "Ms")] <- "Miss"
+train2$Title[train2$Title== "Mme"] <- "Mrs"
+train2$Title[!(train2$Title %in% c('Master', 'Miss', 'Mr', 'Mrs'))] <- "Rare Title"
+```
+
+
+```{r}
+train2$Fsize<-train2$SibSp+train2$Parch+1
+
+data2<-as.data.frame(table(train2$`Last Name`,train2$Fsize))
+colnames(data2)<-c("Last Name","Fsize", "freq")
+data2<-data2[which(data2$freq!=0),]
+
+```
+
+```{r}
+train2$IsAlone<-sapply(train2$Fsize, function(x) ifelse(x==1,1,0))
+```
+
+```{r}
+
+train2$Title<-as.factor(train2$Title)
+Age<-subset(train2,train2$Age!="NA")
+
+
+
+ageImpute <- train(Age~Title+Sex+Parch+SibSp+IsAlone, data=Age, method="gbm", trControl=control, verbose=FALSE)
+
+```
+
+```{r}
+ind2<-Age$PassengerId
+train2<-train2[order(train2$PassengerId),]
+missingAge<-train2[-ind2,]
+predictAge<-predict(ageImpute,missingAge)
+```
+
+```{r}
+missingAge$Age<-predictAge
+
+```
+
+```{r}
+train3<-rbind(Age,missingAge)
+```
+
+
+```{r}
+train2$Title<-as.factor(train2$Title)
+imp2<- aregImpute(~ Age+Parch+SibSp+ Title+Fsize+Ticket.Freq, data = train2, n.impute = 5, nk=0)
+imp2$imputed
+imp2
+
+```
+```{r}
+completedata<-as.data.frame(impute.transcan(imp2, imputation=5, data=train2, list.out=TRUE,pr=FALSE, check=FALSE))
+train2$Age<-completedata$Age
+```
+
+```{r}
+train2<-train2[order(train2$PassengerId),]
+ind<-test$PassengerId
+test2<-train2[ind,]
+train2<-train2[-ind,]
+
+```
+
+```{r}
+
+# Example of Bagging algorithms
+control <- trainControl(method="repeatedcv", number=10,repeats=3, search = "grid",savePredictions=TRUE, classProbs=TRUE)
+seed <- 7
+metric <- "Accuracy"
+levels(train2$Survived) <- c("diey", "live")
+algorithmList <- c('rf', 'glm', 'nnet','knn', 'svmRadial')
+models <- caretList(Survived~Fsize+Embarked+Ticket.Freq+Sex+Age+Parch+SibSp+Pclass, data=train2, methodList=algorithmList, metric=metric, trControl=control)
+
+```
+
+
+```{r}
+results <- resamples(models)
+summary(results)
+dotplot(results)
+
+
+
+```
+
+
+```{r}
+# correlation between results
+modelCor(results)
+stack.glm <- caretStack(models, method="gbm", metric="Accuracy", trControl=control)
+```
+
+
+```{r}
+fit.rf <- train(Survived~Fsize+Embarked+Ticket.Freq+Sex+Age+Parch+SibSp+Pclass, data=train2, method="rf", metric=metric, trControl=control)
+TrainMale<-subset(train2, train2$Sex=="male")
+fit.gbmM <- train(Survived~Fsize+Embarked+Ticket.Freq+Age+Parch+SibSp+Pclass, data=TrainMale, method="gbm", metric=metric, trControl=control, verbose=FALSE)
+```
+
+
+```{r}
+
+fit.gbm <- train(Survived~Fsize+Embarked+Ticket.Freq+Sex+Age+Parch+SibSp+Pclass, data=train2, method="gbm", metric=metric, trControl=control, verbose=FALSE)
+```
+
+```{r}
+varImp(models)
+
+```
+
+```{r}
+
+#train2$isNA<-as.integer(is.na(train2$Age))
+length(train2$isNA)
+#train2$Survived<-as.factor(train2$Survived)
+train2$Cabin<-gsub('[[:digit:]]+', "",train2$Cabin)
+train2$Cabin<-gsub('\\s+.*', "",train2$Cabin)
+```
+
+
+
+
+```{r}
+train2$Cabin<-as.factor(train2$Cabin)
+train2$HasNoCabin<-as.integer(is.na(train2$Cabin))
+
+```
+
+
+
+
+```{r}
+
+#parch with female vs survived
+ggplot(subset(train2, train2$Sex=="female" & train2$Age>=18 & train2$Survived!="NA" & train2$Pclass=="3"), aes(x=Parch, fill=Survived))+geom_bar(stat='Count',position = 'dodge')+theme_grey()+geom_label(stat='count', aes(label=..count..))
+
+#SibSp vs female
+ggplot(subset(train2, train2$Sex=="female" & train2$Age>=18 & train2$Survived!="NA" & train2$Pclass=="3"), aes(x=SibSp, fill=Survived))+geom_bar(stat='Count',position = 'dodge')+theme_grey()+geom_label(stat='count', aes(label=..count..))
+
+
+
+#Pclass 3 female
+ggplot(subset(train2, train2$Sex=="female" & train2$Age>=18 & train2$Pclass=="3" & train2$Survived!="NA"), aes(x=Ticket.Freq, fill=Survived))+geom_bar(stat='Count',position = 'dodge')+theme_grey()+geom_label(stat='count', aes(label=..count..))
+
+
+
+
+
+```
+
+
+```{r}
+test3M<-subset(test3,test3$Sex=="male")
+pred3<-predict(fit.gbmM,test3M)
+predictionsMale3<-data.frame(test3M$PassengerId,pred3)
+predictionsMale3$pred3<-as.numeric(predictionsMale3$pred3)
+predictionsMale3$pred3<-sapply(predictionsMale3$pred3,function(x) x=x-1)
+```
+
+```{r}
+pred<-predict(stack.glm,test2)
+predictions<-data.frame(test2$PassengerId,pred)
+predictions$pred<-as.numeric(predictions$pred)
+predictions$pred<-sapply(predictions$pred,function(x) x=x-1)
+colnames(predictions)<-c("PassengerId","Survived")
+write.csv(predictions, file = "MyData.csv", row.names = FALSE)
+```
+
+
+```{r}
+
+#Cabin vs survived
+ggplot(subset(train2, train2$Survived!="NA"), aes(x=HasNoCabin, fill=Survived))+geom_bar(stat='Count',position = 'dodge')+theme_grey()+geom_label(stat='count', aes(label=..count..))
+
+#Cabin and in P1
+ggplot(subset(train2, train2$Pclass=="1"  & train2$Survived!="NA"), aes(x=HasNoCabin, fill=Survived))+geom_bar(stat='Count',position = 'dodge')+theme_grey()+geom_label(stat='count', aes(label=..count..))
+
+ggplot(subset(train2,train2$HasNoCabin=="0" & train2$Sex=="male" & train2$Pclass=="1" & train2$Survived!="NA"), aes(x=Cabin, fill=Survived))+geom_bar(stat='Count',position = 'dodge')+theme_grey()+geom_label(stat='count', aes(label=..count..))
+```
+
+
+```{r}
+ggplot(subset(train2,train2$Survived!="NA"  & train2$Sex=="female" & train2$Pclass=="3"), aes(x=Fsize, fill=Survived))+geom_bar(stat='Count',position = 'dodge')+theme_grey()+geom_label(stat='count', aes(label=..count..))
+
+#Ticket.Freq vs survived
+ggplot(subset(train2,train2$Survived!="NA" & train2$Sex=="female" & train2$Pclass=="3"), aes(x=Ticket.Freq, fill=Survived))+geom_bar(stat='Count',position = 'dodge')+theme_grey()+geom_label(stat='count', aes(label=..count..))
+
+ggplot(subset(train2,train2$Survived!="NA" & train2$Sex=="female" & train2$Pclass=="3" & train2$Fsize=="1"), aes(x=Ticket.Freq, fill=Survived))+geom_bar(stat='Count',position = 'dodge')+theme_grey()+geom_label(stat='count', aes(label=..count..))
+
+
+
+
+```
+
+
+
+
+
+```{r}
+ggplot(subset(train,train$Sex=="male" & train$Survived!="NA" & train$Pclass=="1" & train$Age>=18), aes(x=Age, fill=Survived)) +
+  geom_density(position="identity")
+
+
+ggplot(subset(train2,train2$Sex=="female" & train2$Survived!="NA" & train2$Pclass=="3" & train2$Age<=18), aes(x=Age, fill=Survived)) +
+  geom_density(position="identity")
+
+ggplot(subset(train,train$Sex=="female" & train$Survived!="NA" & train$Pclass=="3"), aes(x=Age, fill=Survived)) +
+  geom_histogram(position="identity", bins = 15)
+
+ggplot(subset(train2,train2$Sex=="female" & train2$Survived!="NA" & train2$Pclass=="3"), aes(x=Age, fill=Survived)) +
+  geom_histogram(position="identity", bins = 15)
+
+ggplot(subset(train2,train2$Survived!="NA" & train2$Sex=="female" & train2$Pclass=="3"), aes(x=Sex, fill=Survived))+geom_bar(stat='Count',position = 'dodge')+theme_grey()+geom_label(stat='count', aes(label=..count..))
+
+ggplot(subset(train2,train2$Survived!="NA" & train2$Sex=="male"), aes(x=Sex, fill=Survived))+geom_bar(stat='Count',position = 'dodge')+theme_grey()+geom_label(stat='count', aes(label=..count..))
+```
+```{r}
+ggplot(subset(train2,train2$Fsize=="1" & train$Survived!="NA"), aes(x=Age)) +
+  geom_density(position="identity")
+
+ggplot(subset(train2,train2$SibSp=="1" & train$Survived!="NA" & train2$Title=="Miss" & train2$Ticket.Freq=="2"), aes(x=Age)) +
+  geom_density(position="identity")
+
+
+```
+
+
+First I realized that fare is by ticket so one ticket for 2 people is 2x not by person.
+```{r}
+train2$FarePP<-train2$Fare/train2$Ticket.Freq
+
+```
+
+Imputing missing embarked. Ran t-tests based on my own hypothesis that fare was due to embarked and Pclass. The results back my hypothesis that there is a difference in fare base on embarked and pclass. Now the two missing embarked were from Pclass 1.Also, there are only two entries for Q and Pclass equals 1 so it cannot be from class Q. Now given the results I can say that it is most likely in class S
+```{r}
+
+t.test(subset(train2$FarePP,train2$Embarked=="S" & train2$Pclass=="1" ),subset(train2$FarePP,train2$Embarked=="C" & train2$Pclass=="1"))
+
+t.test(subset(train2$FarePP,train2$Embarked=="C" & train2$Pclass=="1"))
+
+t.test(subset(train2$FarePP,train2$Embarked=="S" & train2$Pclass=="1"))
+
+
+
+
+
+
+
+
+```
+```{r}
+train2$Embarked[train2$Ticket=='113572']<-"S"
+```
+
+
+```{r}
+ggplot(train2, aes(x = Embarked, y = Fare, fill=Pclass )) +
+    geom_boxplot() + scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) + theme_grey()
+
+
+ggplot(train2, aes(x = Embarked, y = Fare)) +
+    geom_boxplot() + scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) + theme_grey()
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+analyze<-function(x){
+  chisq.test(table(train2$isNA,x))}
+
+```
+Assuming not Missing Not At Random this test is to see whether its Missing Completely at Random or Missing At random as a result we can tell that in every case for p-value=.05 we reject the null hypothesis that they are missing competely at random. 
+
+```{r}
+
+TestForMissingAtRandom<-lapply(train2, function(x) if(is.integer(x)){analyze(x)})
+print(TestForMissingAtRandom)
+```
+```{r}
+imp<-mice(train2[c(-1,-2,-4,-12,-13)],m=5, method='pmm', seed=5565)
+data2<-complete(imp,action='all')
+fit <- with(data = imp, lm(Age~Title+Sex+Pclass+Embarked+SibSp+Parch+Fare))
+summary(pool(fit))
+
+```
+
